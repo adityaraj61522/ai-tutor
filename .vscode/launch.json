@@ -7,13 +7,6 @@
         {
             "type": "node-terminal",
             "request": "launch",
-            "name": "backend",
-            "command": "npm start",
-            "cwd": "${workspaceFolder}/b-ai-tutor"
-        },
-        {
-            "type": "node-terminal",
-            "request": "launch",
             "name": "Frontend",
             "command": "npm run dev",
             "cwd": "${workspaceFolder}/f-ai-tutor"
@@ -25,6 +18,7 @@
             "program": "${workspaceFolder}/b-ai-tutor/server/app.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}/b-ai-tutor/server",
+            "pythonPath": "${workspaceFolder}/.venv/bin/python",
             "env": {
                 "PORT": "7700",
                 "FLASK_DEBUG": "1"
