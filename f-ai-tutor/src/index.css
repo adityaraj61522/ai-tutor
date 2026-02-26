@@ -1,0 +1,245 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* AI Tutor Design System - Warm, Educational, Approachable */
+
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+@layer base {
+  :root {
+    /* Core brand colors - Teal/Blue educational palette */
+    --background: 180 20% 99%;
+    --foreground: 200 50% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 200 50% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 200 50% 10%;
+
+    /* Primary - Deep Teal */
+    --primary: 175 65% 35%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary - Soft Teal */
+    --secondary: 175 30% 94%;
+    --secondary-foreground: 175 65% 25%;
+
+    /* Muted */
+    --muted: 180 15% 95%;
+    --muted-foreground: 200 15% 45%;
+
+    /* Accent - Warm Coral */
+    --accent: 15 85% 60%;
+    --accent-foreground: 0 0% 100%;
+
+    /* Success - Learning Green */
+    --success: 145 60% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 180 20% 90%;
+    --input: 180 20% 90%;
+    --ring: 175 65% 35%;
+
+    --radius: 0.75rem;
+
+    /* Custom gradients */
+    --gradient-hero: linear-gradient(135deg, hsl(175, 65%, 35%) 0%, hsl(190, 70%, 40%) 50%, hsl(200, 65%, 45%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(0, 0%, 100%) 0%, hsl(180, 20%, 98%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(15, 85%, 60%) 0%, hsl(25, 90%, 55%) 100%);
+    --gradient-avatar: linear-gradient(135deg, hsl(175, 50%, 95%) 0%, hsl(190, 40%, 90%) 100%);
+
+    /* Shadows */
+    --shadow-sm: 0 2px 8px -2px hsl(200 50% 10% / 0.08);
+    --shadow-md: 0 8px 24px -4px hsl(200 50% 10% / 0.12);
+    --shadow-lg: 0 16px 48px -8px hsl(200 50% 10% / 0.15);
+    --shadow-glow: 0 0 40px -10px hsl(175 65% 35% / 0.4);
+    --shadow-accent: 0 8px 24px -4px hsl(15 85% 60% / 0.35);
+
+    /* Sidebar */
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 200 50% 8%;
+    --foreground: 180 20% 98%;
+
+    --card: 200 45% 12%;
+    --card-foreground: 180 20% 98%;
+
+    --popover: 200 45% 12%;
+    --popover-foreground: 180 20% 98%;
+
+    --primary: 175 60% 50%;
+    --primary-foreground: 200 50% 8%;
+
+    --secondary: 200 30% 18%;
+    --secondary-foreground: 175 40% 85%;
+
+    --muted: 200 30% 15%;
+    --muted-foreground: 200 15% 60%;
+
+    --accent: 15 80% 55%;
+    --accent-foreground: 0 0% 100%;
+
+    --success: 145 55% 50%;
+    --success-foreground: 0 0% 100%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 200 30% 20%;
+    --input: 200 30% 20%;
+    --ring: 175 60% 50%;
+
+    --gradient-hero: linear-gradient(135deg, hsl(175, 50%, 30%) 0%, hsl(190, 55%, 35%) 50%, hsl(200, 50%, 40%) 100%);
+    --gradient-card: linear-gradient(180deg, hsl(200, 45%, 12%) 0%, hsl(200, 40%, 10%) 100%);
+    --gradient-avatar: linear-gradient(135deg, hsl(200, 40%, 15%) 0%, hsl(190, 35%, 18%) 100%);
+
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+}
+
+@layer utilities {
+  .gradient-hero {
+    background: var(--gradient-hero);
+  }
+
+  .gradient-card {
+    background: var(--gradient-card);
+  }
+
+  .gradient-accent {
+    background: var(--gradient-accent);
+  }
+
+  .gradient-avatar {
+    background: var(--gradient-avatar);
+  }
+
+  .shadow-card {
+    box-shadow: var(--shadow-md);
+  }
+
+  .shadow-glow {
+    box-shadow: var(--shadow-glow);
+  }
+
+  .shadow-accent {
+    box-shadow: var(--shadow-accent);
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background: linear-gradient(135deg, hsl(175, 65%, 30%) 0%, hsl(200, 70%, 35%) 50%, hsl(15, 85%, 55%) 100%);
+  }
+
+  /* Pulse animation for hand raise */
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.8;
+    }
+    100% {
+      transform: scale(1.5);
+      opacity: 0;
+    }
+  }
+
+  .animate-pulse-ring {
+    animation: pulse-ring 1.5s ease-out infinite;
+  }
+
+  /* Speaking wave animation */
+  @keyframes wave {
+    0%, 100% {
+      transform: scaleY(0.5);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+
+  .animate-wave {
+    animation: wave 0.5s ease-in-out infinite;
+  }
+
+  /* Float animation for avatar */
+  @keyframes float {
+    0%, 100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-10px);
+    }
+  }
+
+  .animate-float {
+    animation: float 3s ease-in-out infinite;
+  }
+
+  /* Fade in up animation */
+  @keyframes fade-in-up {
+    0% {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-in-up {
+    animation: fade-in-up 0.6s ease-out forwards;
+  }
+
+  .animation-delay-100 {
+    animation-delay: 0.1s;
+  }
+
+  .animation-delay-200 {
+    animation-delay: 0.2s;
+  }
+
+  .animation-delay-300 {
+    animation-delay: 0.3s;
+  }
+
+  .animation-delay-400 {
+    animation-delay: 0.4s;
+  }
+}
