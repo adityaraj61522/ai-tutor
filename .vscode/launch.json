@@ -17,6 +17,18 @@
             "name": "Frontend",
             "command": "npm run dev",
             "cwd": "${workspaceFolder}/f-ai-tutor"
+        },
+        {
+            "name": "Flask: b-ai-tutor server",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/b-ai-tutor/server/app.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/b-ai-tutor/server",
+            "env": {
+                "PORT": "7700",
+                "FLASK_DEBUG": "1"
+            }
         }
     ]
 }
