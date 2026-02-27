@@ -1,6 +1,6 @@
 import os
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 
 class GeminiService:

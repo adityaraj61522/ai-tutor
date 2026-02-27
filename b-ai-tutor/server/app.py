@@ -4,6 +4,7 @@ import redis
 from dotenv import load_dotenv
 from gemini_service import get_gemini_service
 from pdf_extractor import extract_text_from_pdf, extract_pdf_metadata
+from vector_store import VectorStore
 from werkzeug.utils import secure_filename
 import tempfile
 
@@ -78,12 +79,15 @@ def queue_length():
 @app.route("/learn", methods=["POST"])
 def learn():
     """
-    Extract text from uploaded PDF and optionally process with Gemini
+    Extract text from uploaded PDF, create embeddings with OpenAI,
+    build FAISS index, and find similar chunks to the topic
     
     Form parameters:
     - uploadedPDF: The PDF file to extract text from
-    - topicToLearn: The topic/subject to focus on (optional)
+    - topicToLearn: The topic/subject to focus on
     """
+    temp_path = None
+    
     try:
         # Check if file is in the request
         if "uploadedPDF" not in request.files:
@@ -98,6 +102,9 @@ def learn():
         if not file.filename.lower().endswith(".pdf"):
             return jsonify({"error": "File must be a PDF"}), 400
         
+        if not topic:
+            return jsonify({"error": "topicToLearn is required"}), 400
+        
         # Save file to temporary location
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             file.save(tmp_file.name)
@@ -108,22 +115,56 @@ def learn():
             extracted_text = extract_text_from_pdf(temp_path)
             metadata = extract_pdf_metadata(temp_path)
             
+            if not extracted_text:
+                return jsonify({"error": "No text extracted from PDF"}), 400
+            
+            # Initialize vector store with Google Gemini
+            vector_store = VectorStore(
+                google_api_key=os.environ.get("GOOGLE_API_KEY"),
+                pickle_file="faiss_store.pkl"
+            )
+            
+            # Create vector store from extracted text
+            success = vector_store.create_vector_store_from_text(extracted_text)
+            
+            if not success:
+                return jsonify({"error": "Failed to create vector store"}), 400
+            
+            # Find similar chunks to the topic
+            similar_chunks = vector_store.search_similar(topic, k=5)
+            
+            # Query with sources using LLM
+            enhanced_query = f"make something interesting and insightful and exciting for humans and in 60 words from: {topic}"
+            qa_result = vector_store.query_with_sources(enhanced_query)
+            
             response = {
                 "status": "success",
                 "topic": topic,
                 "metadata": metadata,
-                "extracted_text": extracted_text,
-                "text_length": len(extracted_text)
+                "extracted_text_length": len(extracted_text),
+                "vector_store_info": vector_store.get_index_info(),
+                "similar_chunks": [
+                    {
+                        "chunk": chunk,
+                        "similarity_score": float(score)
+                    }
+                    for chunk, score in similar_chunks
+                ],
+                "qa_result": qa_result
             }
             
             return jsonify(response), 200
             
         finally:
             # Clean up temporary file
-            if os.path.exists(temp_path):
+            if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
     
     except Exception as e:
+        # Clean up on error
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        
         return jsonify({"error": str(e)}), 500
 
 
