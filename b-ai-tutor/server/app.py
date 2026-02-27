@@ -2,10 +2,20 @@ import os
 from flask import Flask, jsonify, request
 import redis
 from dotenv import load_dotenv
+from gemini_service import get_gemini_service
+from pdf_extractor import extract_text_from_pdf, extract_pdf_metadata
+from werkzeug.utils import secure_filename
+import tempfile
 
 load_dotenv()
 
 app = Flask(__name__)
+
+# Initialize Gemini service
+try:
+    gemini = get_gemini_service()
+except Exception as e:
+    print(f"Warning: Could not initialize Gemini service: {e}")
 
 # Initialize Redis connection
 redis_client = redis.Redis(
@@ -61,6 +71,58 @@ def queue_length():
     try:
         length = redis_client.llen("task_queue")
         return jsonify({"length": length}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/learn", methods=["POST"])
+def learn():
+    """
+    Extract text from uploaded PDF and optionally process with Gemini
+    
+    Form parameters:
+    - uploadedPDF: The PDF file to extract text from
+    - topicToLearn: The topic/subject to focus on (optional)
+    """
+    try:
+        # Check if file is in the request
+        if "uploadedPDF" not in request.files:
+            return jsonify({"error": "No PDF file provided"}), 400
+        
+        file = request.files["uploadedPDF"]
+        topic = request.form.get("topicToLearn", "")
+        
+        if file.filename == "":
+            return jsonify({"error": "No PDF file selected"}), 400
+        
+        if not file.filename.lower().endswith(".pdf"):
+            return jsonify({"error": "File must be a PDF"}), 400
+        
+        # Save file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            file.save(tmp_file.name)
+            temp_path = tmp_file.name
+        
+        try:
+            # Extract text from PDF
+            extracted_text = extract_text_from_pdf(temp_path)
+            metadata = extract_pdf_metadata(temp_path)
+            
+            response = {
+                "status": "success",
+                "topic": topic,
+                "metadata": metadata,
+                "extracted_text": extracted_text,
+                "text_length": len(extracted_text)
+            }
+            
+            return jsonify(response), 200
+            
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+    
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
