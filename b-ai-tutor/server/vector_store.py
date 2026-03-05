@@ -1,5 +1,4 @@
 import os
-import pickle
 import time
 from typing import List, Dict, Any, Tuple
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
@@ -12,7 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 class VectorStore:
     """Vector store for managing embeddings and similarity search using FAISS and OpenAI"""
     
-    def __init__(self, google_api_key: str = None, pickle_file: str = "faiss_store.pkl"):
+    def __init__(self, google_api_key: str = None, pickle_file: str = "faiss_store"):
         """Initialize the vector store with Google Gemini embeddings"""
         if google_api_key is None:
             google_api_key = os.environ.get("GOOGLE_API_KEY")
@@ -23,9 +22,9 @@ class VectorStore:
         self.google_api_key = google_api_key
         
         self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004",
+            model="gemini-embedding-001",
             google_api_key=google_api_key,
-            model_kwargs={"api_version": "v1"}
+            model_kwargs={"api_version": "v1beta"}
         )
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
@@ -34,7 +33,8 @@ class VectorStore:
             model_kwargs={"api_version": "v1"}
         )
         self.vectorstore = None
-        self.pickle_file = pickle_file
+        # Use the path as a directory for FAISS save_local/load_local
+        self.pickle_file = pickle_file.removesuffix(".pkl")
         self.text_splitter = RecursiveCharacterTextSplitter(
             separators=["\n\n", "\n", ".", ","],
             chunk_size=1000
@@ -118,9 +118,8 @@ class VectorStore:
             # Wait a moment to avoid rate limiting
             time.sleep(2)
 
-            # Save to pickle file
-            with open(self.pickle_file, "wb") as f:
-                pickle.dump(self.vectorstore, f)
+            # Save using FAISS native serialization (avoids pickle thread-lock issue)
+            self.vectorstore.save_local(self.pickle_file)
 
             return True
         
@@ -171,12 +170,13 @@ class VectorStore:
             Dictionary with answer and sources
         """
         if self.vectorstore is None:
-            # Try to load from pickle file
+            # Try to load from saved FAISS index
             if os.path.exists(self.pickle_file):
-                with open(self.pickle_file, "rb") as f:
-                    self.vectorstore = pickle.load(f)
+                self.vectorstore = FAISS.load_local(
+                    self.pickle_file, self.embeddings, allow_dangerous_deserialization=True
+                )
             else:
-                raise ValueError("Vector store not initialized and pickle file not found")
+                raise ValueError("Vector store not initialized and saved index not found")
         
         try:
             # Get retriever from vectorstore
@@ -224,10 +224,11 @@ class VectorStore:
             raise Exception(f"Error querying vector store: {str(e)}")
     
     def load_index(self):
-        """Load FAISS index from pickle file"""
+        """Load FAISS index from saved directory"""
         if os.path.exists(self.pickle_file):
-            with open(self.pickle_file, "rb") as f:
-                self.vectorstore = pickle.load(f)
+            self.vectorstore = FAISS.load_local(
+                self.pickle_file, self.embeddings, allow_dangerous_deserialization=True
+            )
             return True
         return False
     
