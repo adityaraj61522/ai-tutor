@@ -6,7 +6,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { GraduationCap, Upload, FileText, X, ArrowRight, ArrowLeft, Loader2 } from "lucide-react";
 import InterestModal from "@/components/InterestModal";
 
-const BACKEND_URL = "http://localhost:7700";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL as string;
 
 const SESSION_STORAGE_KEY = "tutorSessionUsed";
 

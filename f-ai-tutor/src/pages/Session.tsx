@@ -15,7 +15,7 @@ import {
   Loader2,
 } from "lucide-react";
 
-const BACKEND_URL = "http://localhost:7700";
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL as string;
 const EMPTY_QUEUE_RETRY_MS = 2500;
 const ERROR_RETRY_MS = 4000;
 const MAX_QUESTION_LEN = 500; // mirrors server truncation limit
