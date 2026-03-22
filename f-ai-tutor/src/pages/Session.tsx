@@ -8,7 +8,6 @@ import {
   X,
   Volume2,
   VolumeX,
-  ArrowLeft,
   Sparkles,
   Mic,
   MicOff,
@@ -19,6 +18,7 @@ import {
 const BACKEND_URL = "http://localhost:7700";
 const EMPTY_QUEUE_RETRY_MS = 2500;
 const ERROR_RETRY_MS = 4000;
+const MAX_QUESTION_LEN = 500; // mirrors server truncation limit
 
 type SessionState = "teaching" | "listening" | "responding";
 
@@ -64,12 +64,21 @@ const Session = () => {
   const [questionText, setQuestionText] = useState("");
   const [isSubmittingQuestion, setIsSubmittingQuestion] = useState(false);
   const [isRecognising, setIsRecognising] = useState(false);
+  const [questionLimitReached, setQuestionLimitReached] = useState(false);
+  const [questionRateLimited, setQuestionRateLimited] = useState(false);
 
   // Refs kept stable across renders
   const sessionStateRef = useRef<SessionState>("teaching");
   const isMutedRef = useRef(false);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  // True once the server returns done:true — prevents the loop from spinning
+  // on an empty queue. Reset to false each time a question is submitted so
+  // polling resumes when the answer sentences are pushed.
+  const teachingIdleRef = useRef(false);
+  // AbortController for the current in-flight /next fetch; cancelled on
+  // unmount and whenever we deliberately stop the loop.
+  const fetchAbortRef = useRef<AbortController | null>(null);
 
   // Keep refs in sync with state
   useEffect(() => { sessionStateRef.current = sessionState; }, [sessionState]);
@@ -80,7 +89,7 @@ const Session = () => {
   // ---------------------------------------------------------------------------
 
   const speakSentence = useCallback(
-    (text: string, sid: string, onFinished: () => void) => {
+    (text: string, onFinished: () => void) => {
       if (isMutedRef.current) {
         setCurrentText(text);
         setIsSpeaking(false);
@@ -119,12 +128,17 @@ const Session = () => {
     (sid: string) => {
       if (sessionStateRef.current === "listening") return;
 
-      fetch(`${BACKEND_URL}/session/${sid}/next`)
+      // Cancel any previous in-flight request before starting a new one
+      fetchAbortRef.current?.abort();
+      const controller = new AbortController();
+      fetchAbortRef.current = controller;
+
+      fetch(`${BACKEND_URL}/session/${sid}/next`, { signal: controller.signal })
         .then((r) => r.json())
         .then((data) => {
           if (data.text) {
-            // Speak then immediately schedule the next poll
-            speakSentence(data.text, sid, () => {
+            // Got a sentence — speak it, then immediately poll for the next
+            speakSentence(data.text, () => {
               if (sessionStateRef.current !== "listening") {
                 pollTimeoutRef.current = setTimeout(
                   () => pollNext(sid),
@@ -132,15 +146,24 @@ const Session = () => {
                 );
               }
             });
+          } else if (data.done) {
+            // Server confirmed the queue is fully drained — stop the loop.
+            // Polling will be restarted explicitly when a question is submitted.
+            teachingIdleRef.current = true;
+            setSessionState("teaching");
+            setCurrentText("All caught up! Raise your hand to ask a question.");
+            setIsSpeaking(false);
           } else {
-            // Queue empty → retry after a short pause
+            // Transient empty queue (e.g. question still being processed) — retry
             pollTimeoutRef.current = setTimeout(
               () => pollNext(sid),
               EMPTY_QUEUE_RETRY_MS,
             );
           }
         })
-        .catch(() => {
+        .catch((err: unknown) => {
+          // AbortError means we deliberately cancelled — don't retry
+          if (err instanceof Error && err.name === "AbortError") return;
           pollTimeoutRef.current = setTimeout(
             () => pollNext(sid),
             ERROR_RETRY_MS,
@@ -173,6 +196,7 @@ const Session = () => {
 
     return () => {
       if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+      fetchAbortRef.current?.abort();
       window.speechSynthesis.cancel();
       recognitionRef.current?.stop();
     };
@@ -181,7 +205,8 @@ const Session = () => {
 
   // Re-start polling when mute is turned OFF while not listening
   useEffect(() => {
-    if (!isMuted && !isSpeaking && sessionState !== "listening" && sessionId) {
+    // Only kick the loop if teaching still has content (not idled after done:true)
+    if (!isMuted && !isSpeaking && sessionState !== "listening" && sessionId && !teachingIdleRef.current) {
       // If we turned mute off, kick the loop (it may have stalled)
       if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
       pollTimeoutRef.current = setTimeout(() => pollNext(sessionId), 300);
@@ -198,6 +223,7 @@ const Session = () => {
       // Pause speech and enter listening mode
       window.speechSynthesis.cancel();
       if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+      fetchAbortRef.current?.abort();
       setIsSpeaking(false);
       setSessionState("listening");
       setCurrentText("I'm listening… Go ahead with your question.");
@@ -207,7 +233,8 @@ const Session = () => {
       recognitionRef.current?.stop();
       setIsRecognising(false);
       setSessionState("teaching");
-      if (sessionId) {
+      // Only restart polling if the initial lesson wasn't already exhausted
+      if (sessionId && !teachingIdleRef.current) {
         pollTimeoutRef.current = setTimeout(() => pollNext(sessionId), 300);
       }
     }
@@ -244,6 +271,10 @@ const Session = () => {
     setSessionState("responding");
     setCurrentText("Great question! Let me think about that…");
 
+    // Reset the idle flag so the polling loop will run again once the
+    // answer sentences are pushed to the queue by the server.
+    teachingIdleRef.current = false;
+
     try {
       const res = await fetch(
         `${BACKEND_URL}/session/${sessionId}/question`,
@@ -253,6 +284,25 @@ const Session = () => {
           body: JSON.stringify({ question: questionText }),
         },
       );
+
+      if (res.status === 429) {
+        const body = await res.json().catch(() => ({}));
+        if (body.error === "question_limit_reached") {
+          setQuestionLimitReached(true);
+          setSessionState("teaching");
+          setCurrentText("You've reached the question limit for this session. Let's continue with the lesson!");
+        } else {
+          // Per-30s rate limit hit
+          setQuestionRateLimited(true);
+          setSessionState("teaching");
+          setCurrentText("Please wait 30 seconds before asking another question.");
+          setTimeout(() => setQuestionRateLimited(false), 30_000);
+        }
+        if (sessionId) {
+          pollTimeoutRef.current = setTimeout(() => pollNext(sessionId), 3000);
+        }
+        return;
+      }
 
       if (!res.ok) throw new Error("Failed to submit question");
 
@@ -275,6 +325,7 @@ const Session = () => {
     window.speechSynthesis.cancel();
     recognitionRef.current?.stop();
     if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current);
+    fetchAbortRef.current?.abort();
     localStorage.removeItem("tutorSessionId");
     localStorage.removeItem("tutorTopic");
     localStorage.removeItem("tutorFileName");
@@ -404,22 +455,42 @@ const Session = () => {
           {/* Question panel — shown while listening */}
           {sessionState === "listening" && (
             <div className="w-full space-y-3 animate-fade-in-up">
-              <Textarea
-                placeholder={
-                  isRecognising
-                    ? "Listening… speak your question"
-                    : "Type your question here…"
-                }
-                value={questionText}
-                onChange={(e) => setQuestionText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSubmitQuestion();
+              {questionLimitReached && (
+                <div className="px-4 py-3 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm text-center">
+                  You’ve used all 20 questions for this session.
+                </div>
+              )}
+              {questionRateLimited && (
+                <div className="px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-sm text-center">
+                  Slow down a little — you're asking questions very quickly. Please wait 30 seconds.
+                </div>
+              )}
+              <div className="relative">
+                <Textarea
+                  placeholder={
+                    isRecognising
+                      ? "Listening… speak your question"
+                      : "Type your question here…"
                   }
-                }}
-                className="resize-none min-h-[80px] text-base"
-              />
+                  value={questionText}
+                  maxLength={MAX_QUESTION_LEN}
+                  onChange={(e) => setQuestionText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSubmitQuestion();
+                    }
+                  }}
+                  disabled={questionLimitReached}
+                  className="resize-none min-h-[80px] text-base pr-16"
+                />
+                <span className={`absolute bottom-2 right-3 text-xs tabular-nums pointer-events-none ${questionText.length >= MAX_QUESTION_LEN - 50
+                  ? "text-destructive font-medium"
+                  : "text-muted-foreground"
+                  }`}>
+                  {questionText.length}/{MAX_QUESTION_LEN}
+                </span>
+              </div>
               <div className="flex gap-3">
                 {(window.SpeechRecognition || window.webkitSpeechRecognition) && (
                   <Button
@@ -433,6 +504,7 @@ const Session = () => {
                         startSpeechRecognition();
                       }
                     }}
+                    disabled={questionLimitReached}
                     className={`rounded-full ${isRecognising ? "text-destructive border-destructive" : ""}`}
                     title={isRecognising ? "Stop recording" : "Start voice input"}
                   >
@@ -447,7 +519,7 @@ const Session = () => {
                   variant="hero"
                   className="flex-1 gap-2"
                   onClick={handleSubmitQuestion}
-                  disabled={!questionText.trim() || isSubmittingQuestion}
+                  disabled={!questionText.trim() || isSubmittingQuestion || questionLimitReached || questionRateLimited}
                 >
                   {isSubmittingQuestion ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -489,11 +561,14 @@ const Session = () => {
                 variant="handRaise"
                 size="iconXl"
                 onClick={handleHandRaise}
+                disabled={questionLimitReached && sessionState !== "listening"}
                 className={`relative ${sessionState === "listening" ? "bg-accent scale-110" : ""}`}
                 title={
-                  sessionState === "listening"
-                    ? "Cancel — go back to teaching"
-                    : "Raise hand to ask a question"
+                  questionLimitReached
+                    ? "Question limit reached for this session"
+                    : sessionState === "listening"
+                      ? "Cancel — go back to teaching"
+                      : "Raise hand to ask a question"
                 }
               >
                 {sessionState === "listening" ? (
@@ -510,9 +585,13 @@ const Session = () => {
 
           {/* Instruction */}
           <p className="text-sm text-muted-foreground text-center">
-            {sessionState === "listening"
-              ? "Type or speak your question, then click Ask"
-              : "Raise your hand to pause and ask a question"}
+            {questionLimitReached
+              ? "You’ve used all your questions for this session."
+              : questionRateLimited
+                ? "Too many questions in a short time — please wait 30 seconds."
+                : sessionState === "listening"
+                  ? "Type or speak your question, then click Ask"
+                  : "Raise your hand to pause and ask a question"}
           </p>
         </div>
       </main>

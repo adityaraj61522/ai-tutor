@@ -40,16 +40,29 @@ const Setup = () => {
     e.preventDefault();
     setIsDragging(false);
     const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile) {
-      setFile(droppedFile);
-    }
+    if (droppedFile) validateAndSetFile(droppedFile);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB — mirrors server limit
+  const MAX_TOPIC_LEN = 300;
+
+  const validateAndSetFile = (f: File) => {
+    if (!f.name.toLowerCase().endsWith(".pdf")) {
+      setError("Only PDF files are supported.");
+      return;
+    }
+    if (f.size > MAX_FILE_BYTES) {
+      setError(`File is too large (${(f.size / 1024 / 1024).toFixed(1)} MB). Maximum allowed size is 10 MB.`);
+      return;
+    }
+    setError(null);
+    setFile(f);
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile) {
-      setFile(selectedFile);
-    }
+    if (selectedFile) validateAndSetFile(selectedFile);
   };
 
   const removeFile = () => {
@@ -78,6 +91,10 @@ const Setup = () => {
         return;
       }
 
+      if (res.status === 413) {
+        throw new Error("File is too large. Please upload a PDF smaller than 10 MB.");
+      }
+
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `Server error: ${res.status}`);
@@ -98,7 +115,7 @@ const Setup = () => {
     }
   };
 
-  const isValid = file && topic.trim().length > 0 && !isLoading;
+  const isValid = file && topic.trim().length > 0 && topic.length <= (MAX_TOPIC_LEN ?? 300) && !isLoading;
 
   return (
     <div className="min-h-screen bg-background">
@@ -156,7 +173,7 @@ const Setup = () => {
                 >
                   <input
                     type="file"
-                    accept=".pdf,.doc,.docx,.txt,.md"
+                    accept=".pdf"
                     onChange={handleFileChange}
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   />
@@ -166,10 +183,10 @@ const Setup = () => {
                     </div>
                     <div>
                       <p className="text-lg font-medium mb-1">
-                        Drop your file here or <span className="text-primary">browse</span>
+                        Drop your PDF here or <span className="text-primary">browse</span>
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        Supports PDF, DOC, DOCX, TXT, MD
+                        PDF only · max 10 MB
                       </p>
                     </div>
                   </div>
@@ -207,12 +224,20 @@ const Setup = () => {
                 id="topic"
                 placeholder="e.g., Explain the key concepts of photosynthesis from chapter 3..."
                 value={topic}
+                maxLength={300}
                 onChange={(e) => setTopic(e.target.value)}
-                className="min-h-[120px] resize-none text-base"
+                className={`min-h-[120px] resize-none text-base ${topic.length >= 280 ? "border-destructive focus-visible:ring-destructive" : ""
+                  }`}
               />
-              <p className="text-sm text-muted-foreground">
-                Be specific about the topic or concept you want to understand.
-              </p>
+              <div className="flex justify-between items-center">
+                <p className="text-sm text-muted-foreground">
+                  Be specific about the topic or concept you want to understand.
+                </p>
+                <p className={`text-xs tabular-nums ${topic.length >= 280 ? "text-destructive font-medium" : "text-muted-foreground"
+                  }`}>
+                  {topic.length}/300
+                </p>
+              </div>
             </div>
 
             {/* Error message */}

@@ -8,6 +8,8 @@ import redis
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from pdf_extractor import extract_text_from_pdf
 from vector_store import VectorStore
@@ -28,7 +30,30 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # Allow cross-origin requests from the frontend
+
+# ---------------------------------------------------------------------------
+# Security config
+# ---------------------------------------------------------------------------
+
+# 10 MB upload limit – prevents huge PDFs that generate hundreds of embed calls
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+# Restrict CORS to the configured frontend origin (default: localhost dev)
+_allowed_origins = os.environ.get("CORS_ORIGINS", "http://localhost:8080").split(",")
+CORS(app, origins=[o.strip() for o in _allowed_origins])
+
+# Per-IP rate limiter backed by the same Redis instance
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    storage_uri=(
+        f"redis://:{os.environ.get('REDIS_PASSWORD', '')}@"
+        f"{os.environ.get('REDIS_HOST', 'localhost')}:"
+        f"{os.environ.get('REDIS_PORT', 6379)}/"
+        f"{os.environ.get('REDIS_DB', 0)}"
+    ),
+    default_limits=[],  # No global default – limits are per-route
+)
 
 # ---------------------------------------------------------------------------
 # Redis client
@@ -51,6 +76,12 @@ logger.info(
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
+
+@app.errorhandler(413)
+def request_entity_too_large(e):
+    """Friendly JSON response when the uploaded file exceeds MAX_CONTENT_LENGTH."""
+    return jsonify({"error": "File too large. Maximum allowed size is 10 MB."}), 413
+
 
 @app.route("/", methods=["GET"])
 def index():
@@ -93,22 +124,68 @@ def _split_into_sentences(text: str) -> list[str]:
 # IP-based one-time rate limiter helper
 # ---------------------------------------------------------------------------
 
+# Maximum allowed lengths for user-supplied text fields
+_MAX_TOPIC_LEN = 300
+_MAX_QUESTION_LEN = 500
+# Maximum questions a single session may ask (Gemini LLM call each)
+_MAX_QUESTIONS_PER_SESSION = 20
+# Maximum characters of extracted PDF text to embed.
+# A 10 MB text-dense PDF can produce 500 K+ chars → 500+ embedding API calls.
+# Capping at 50 000 chars keeps embedding calls to ≈50 per upload.
+_MAX_EXTRACTED_TEXT_LEN = 50_000
+
+
+# UUID pattern used to validate session-id URL parameters.
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+
+
+def _validate_session_id(session_id: str) -> bool:
+    """Return True only when session_id is a well-formed UUID v4 string."""
+    return bool(_UUID_RE.match(session_id))
+
+
 def _get_client_ip() -> str:
-    """Return the real client IP, respecting X-Forwarded-For if present."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """
+    Return the real client IP.
+
+    X-Forwarded-For is only trusted when the TRUST_PROXY environment variable
+    is set to '1', i.e. when the app is deployed behind a known reverse proxy.
+    Trusting it unconditionally allows trivial IP-spoofing attacks.
+    """
+    if os.environ.get("TRUST_PROXY") == "1":
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
 
-def _is_ip_rate_limited(ip: str) -> bool:
-    """Return True if this IP has already consumed its one free upload."""
+def _ip_already_used(ip: str) -> bool:
+    """Non-atomic fast check: return True if this IP has already consumed its slot."""
     return redis_client.exists(f"rate_limit:ip:{ip}") == 1
 
 
-def _mark_ip_used(ip: str) -> None:
-    """Permanently flag this IP as having used its one free upload."""
-    redis_client.set(f"rate_limit:ip:{ip}", "1")
+def _claim_ip_slot(ip: str) -> bool:
+    """
+    Atomically claim the one-time upload slot for this IP.
+
+    Uses Redis SET NX so that two concurrent requests from the same IP cannot
+    both pass the rate-limit check before either records the usage — the
+    classic TOCTOU race that the old check-then-set pattern suffered from.
+
+    This must be called AFTER input validation but BEFORE any Gemini API call
+    so that:
+      - A user with an invalid file can correct and retry without losing their slot.
+      - A transient Gemini error does not leave the slot open for unlimited retries.
+
+    Returns:
+        True  – slot was just claimed (request is allowed to proceed).
+        False – key already existed (request must be rejected).
+    """
+    # SET NX returns True when the key is newly written, None otherwise.
+    return redis_client.set(f"rate_limit:ip:{ip}", "1", nx=True) is True
 
 
 @app.route("/upload", methods=["POST"])
@@ -133,7 +210,9 @@ def upload():
     """
     client_ip = _get_client_ip()
 
-    if _is_ip_rate_limited(client_ip):
+    # Fast non-atomic check: reject immediately if IP is already permanently blocked.
+    # (The key is never deleted once set, so reading without a lock is safe here.)
+    if _ip_already_used(client_ip):
         logger.info("upload: rate-limited request from IP %s.", client_ip)
         return jsonify({"error": "rate_limited"}), 429
 
@@ -151,6 +230,8 @@ def upload():
             return jsonify({"error": "File must be a PDF"}), 400
         if not topic:
             return jsonify({"error": "topicToLearn is required"}), 400
+        if len(topic) > _MAX_TOPIC_LEN:
+            return jsonify({"error": f"topicToLearn must be {_MAX_TOPIC_LEN} characters or fewer"}), 400
 
         logger.info("upload: topic='%s', file='%s'.", topic, file.filename)
 
@@ -163,6 +244,26 @@ def upload():
         extracted_text = extract_text_from_pdf(temp_path)
         if not extracted_text:
             return jsonify({"error": "No text extracted from PDF"}), 400
+
+        # Cap text length to limit embedding API calls.
+        # A 10 MB all-text PDF can produce 500 K+ chars → 500+ Gemini embedding
+        # calls. Truncating to _MAX_EXTRACTED_TEXT_LEN keeps costs predictable.
+        if len(extracted_text) > _MAX_EXTRACTED_TEXT_LEN:
+            logger.warning(
+                "upload: extracted text truncated from %d to %d chars for session cost control.",
+                len(extracted_text),
+                _MAX_EXTRACTED_TEXT_LEN,
+            )
+            extracted_text = extracted_text[:_MAX_EXTRACTED_TEXT_LEN]
+
+        # Atomically claim the IP slot just before the first Gemini call.
+        # This prevents both the TOCTOU race (two concurrent requests from the
+        # same IP bypassing the check above) and retry loops caused by
+        # transient Gemini errors (the slot is consumed regardless of whether
+        # the API call succeeds).
+        if not _claim_ip_slot(client_ip):
+            logger.info("upload: concurrent rate-limit collision for IP %s.", client_ip)
+            return jsonify({"error": "rate_limited"}), 429
 
         # Create session
         session_id = str(uuid.uuid4())
@@ -206,14 +307,11 @@ def upload():
             "upload: session '%s' created with %d sentences.", session_id, len(sentences)
         )
 
-        # Permanently record this IP so it cannot upload again
-        _mark_ip_used(client_ip)
-
         return jsonify({"session_id": session_id, "sentence_count": len(sentences)}), 200
 
     except Exception as exc:
         logger.exception("upload: unhandled error – %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
     finally:
         _cleanup_temp_file(temp_path)
 
@@ -223,6 +321,7 @@ def upload():
 # ---------------------------------------------------------------------------
 
 @app.route("/session/<session_id>/next", methods=["GET"])
+@limiter.limit("120 per minute")
 def session_next(session_id: str):
     """
     Pop and return the next sentence from the session's Redis queue.
@@ -230,8 +329,11 @@ def session_next(session_id: str):
     Returns:
         200 – {"text": "<sentence>", "done": false, "remaining": <int>}
               or {"text": null, "done": true, "remaining": 0} when empty.
+        400 – Invalid session_id format.
         500 – Redis error.
     """
+    if not _validate_session_id(session_id):
+        return jsonify({"error": "Invalid session ID"}), 400
     try:
         queue_key = f"session:{session_id}:queue"
         sentence = redis_client.lpop(queue_key)
@@ -245,7 +347,7 @@ def session_next(session_id: str):
 
     except Exception as exc:
         logger.exception("session_next: error – %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "An internal error occurred."}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +355,7 @@ def session_next(session_id: str):
 # ---------------------------------------------------------------------------
 
 @app.route("/session/<session_id>/question", methods=["POST"])
+@limiter.limit("1 per 30 seconds")
 def session_question(session_id: str):
     """
     Answer a student's question using the session's FAISS vector store and
@@ -263,20 +366,41 @@ def session_question(session_id: str):
 
     Returns:
         200 – {"status": "queued", "sentence_count": <int>}
-        400 – Missing question.
+        400 – Missing question or invalid session_id format.
         404 – Session not found / expired.
         500 – Processing error.
     """
+    if not _validate_session_id(session_id):
+        return jsonify({"error": "Invalid session ID"}), 400
     try:
         data = request.get_json(silent=True) or {}
         question = data.get("question", "").strip()
         if not question:
             return jsonify({"error": "question is required"}), 400
+        # Truncate oversized questions to cap token costs
+        question = question[:_MAX_QUESTION_LEN]
 
         meta_key = f"session:{session_id}:meta"
         meta = redis_client.hgetall(meta_key)
         if not meta:
             return jsonify({"error": "Session not found or expired"}), 404
+
+        # Enforce per-session question cap
+        q_count_key = f"session:{session_id}:question_count"
+        question_count = int(redis_client.get(q_count_key) or 0)
+        if question_count >= _MAX_QUESTIONS_PER_SESSION:
+            logger.info(
+                "session_question: session '%s' hit the %d-question cap.",
+                session_id, _MAX_QUESTIONS_PER_SESSION,
+            )
+            return jsonify({"error": "question_limit_reached"}), 429
+        # Use a pipeline so INCR and EXPIRE are sent atomically.
+        # If the server crashes between two separate commands the key would
+        # persist forever with no TTL, permanently consuming a question slot.
+        pipe = redis_client.pipeline()
+        pipe.incr(q_count_key)
+        pipe.expire(q_count_key, 3600)
+        pipe.execute()
 
         store_path = meta.get("store_path", "")
         api_key = os.environ.get("GOOGLE_API_KEY")
@@ -306,7 +430,7 @@ def session_question(session_id: str):
 
     except Exception as exc:
         logger.exception("session_question: error – %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 # ---------------------------------------------------------------------------
