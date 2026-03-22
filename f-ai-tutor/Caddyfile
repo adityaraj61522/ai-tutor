@@ -1,11 +1,9 @@
-tutorai.aditya-raj.site {
+# Plain HTTP only – TLS is handled by the system Caddy on the host.
+# Host Caddy proxies tutorai.aditya-raj.site → localhost:3000 (this container).
+:80 {
     root * /srv/www
     file_server
     # SPA fallback – unknown paths serve index.html
     try_files {path} /index.html
     encode gzip
-}
-
-api-tutorai.aditya-raj.site {
-    reverse_proxy backend:7700
 }

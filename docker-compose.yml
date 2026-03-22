@@ -1,5 +1,4 @@
 services:
-
   # --------------------------------------------------------------------------
   # Flask backend
   # Redis is hosted externally – configure it via .env (REDIS_HOST etc.)
@@ -18,10 +17,13 @@ services:
     volumes:
       # Persist FAISS indexes across container restarts
       - faiss_data:/app/faiss_store
+    ports:
+      # Exposed on 7700 – host Caddy proxies api-tutorai.aditya-raj.site → localhost:7700
+      - "7700:7700"
 
   # --------------------------------------------------------------------------
-  # Caddy – serves React SPA on tutorai.aditya-raj.site (auto-TLS)
-  #         and reverse-proxies api-tutorai.aditya-raj.site → backend
+  # Docker Caddy – serves React SPA on plain HTTP :80 (host port 3000)
+  # Host Caddy proxies tutorai.aditya-raj.site → localhost:3000 (with TLS)
   # --------------------------------------------------------------------------
   frontend:
     build:
@@ -31,17 +33,10 @@ services:
         VITE_BACKEND_URL: "https://api-tutorai.aditya-raj.site"
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"   # HTTP/3
-    volumes:
-      # Caddy stores ACME (Let's Encrypt) certs here – persist across restarts
-      - caddy_data:/data
-      - caddy_config:/config
+      # Exposed on 3000 – host Caddy proxies tutorai.aditya-raj.site → localhost:3000
+      - "3000:80"
     depends_on:
       - backend
 
 volumes:
   faiss_data:
-  caddy_data:
-  caddy_config:
