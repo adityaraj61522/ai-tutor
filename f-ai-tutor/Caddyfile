@@ -1,0 +1,11 @@
+tutorai.aditya-raj.site {
+    root * /srv/www
+    file_server
+    # SPA fallback – unknown paths serve index.html
+    try_files {path} /index.html
+    encode gzip
+}
+
+api-tutorai.aditya-raj.site {
+    reverse_proxy backend:7700
+}

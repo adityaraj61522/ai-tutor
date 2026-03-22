@@ -1,0 +1,47 @@
+services:
+
+  # --------------------------------------------------------------------------
+  # Flask backend
+  # Redis is hosted externally – configure it via .env (REDIS_HOST etc.)
+  # --------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./b-ai-tutor/server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # All secrets / Redis connection details come from the .env file
+    env_file: .env
+    environment:
+      # Tell Flask to trust X-Forwarded-For set by Caddy
+      TRUST_PROXY: "1"
+      PORT: "7700"
+    volumes:
+      # Persist FAISS indexes across container restarts
+      - faiss_data:/app/faiss_store
+
+  # --------------------------------------------------------------------------
+  # Caddy – serves React SPA on tutorai.aditya-raj.site (auto-TLS)
+  #         and reverse-proxies api-tutorai.aditya-raj.site → backend
+  # --------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./f-ai-tutor
+      dockerfile: Dockerfile
+      args:
+        VITE_BACKEND_URL: "https://api-tutorai.aditya-raj.site"
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      # Caddy stores ACME (Let's Encrypt) certs here – persist across restarts
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  faiss_data:
+  caddy_data:
+  caddy_config:
