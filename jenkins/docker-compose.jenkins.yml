@@ -5,6 +5,9 @@
 #   cp jenkins/.env.example jenkins/.env   # set JENKINS_ADMIN_PASSWORD
 #   docker compose -f jenkins/docker-compose.jenkins.yml up -d --build
 
+# TLS is handled by the host Caddy.
+# Host Caddy proxies ai-jenkins.aditya-raj.site → localhost:8080 (this container).
+
 services:
   jenkins:
     build:
@@ -12,12 +15,9 @@ services:
       dockerfile: Dockerfile
     container_name: ai-tutor-jenkins
     restart: unless-stopped
-    # Port 8080 is intentionally NOT exposed to the host –
-    # Caddy is the only entry-point (handles TLS termination).
-    expose:
-      - "8080"
     ports:
-      - "50000:50000" # JNLP agent port for external build agents
+      - "127.0.0.1:8080:8080" # only reachable from host; Caddy proxies externally
+      - "50000:50000"          # JNLP agent port for external build agents
     volumes:
       # Persist Jenkins home (jobs, credentials, plugins, config)
       - jenkins_home:/var/jenkins_home
@@ -32,30 +32,6 @@ services:
       JAVA_OPTS: >-
         -Djenkins.install.runSetupWizard=false
         -Dcasc.jenkins.config=/var/jenkins_home/casc
-    networks:
-      - jenkins_net
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: ai-tutor-jenkins-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80" # HTTP → redirected to HTTPS by Caddy
-      - "443:443" # HTTPS (auto-TLS via Let's Encrypt)
-      - "443:443/udp" # HTTP/3
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data # persists TLS certificates
-      - caddy_config:/config
-    depends_on:
-      - jenkins
-    networks:
-      - jenkins_net
 
 volumes:
   jenkins_home:
-  caddy_data:
-  caddy_config:
-
-networks:
-  jenkins_net:
