@@ -1,16 +1,3 @@
-"""
-Flask application entry point for the AI Tutor backend.
-
-Exposes REST endpoints for:
-  - Health check (GET /)
-  - PDF upload + session creation (POST /upload)
-  - Per-session sentence polling (GET /session/<id>/next)
-  - Per-session question answering (POST /session/<id>/question)
-
-Environment variables (see .env):
-  PORT, FLASK_DEBUG, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, GOOGLE_API_KEY
-"""
-
 import logging
 import os
 import re
@@ -102,12 +89,37 @@ def _split_into_sentences(text: str) -> list[str]:
 # PDF upload → session creation
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# IP-based one-time rate limiter helper
+# ---------------------------------------------------------------------------
+
+def _get_client_ip() -> str:
+    """Return the real client IP, respecting X-Forwarded-For if present."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _is_ip_rate_limited(ip: str) -> bool:
+    """Return True if this IP has already consumed its one free upload."""
+    return redis_client.exists(f"rate_limit:ip:{ip}") == 1
+
+
+def _mark_ip_used(ip: str) -> None:
+    """Permanently flag this IP as having used its one free upload."""
+    redis_client.set(f"rate_limit:ip:{ip}", "1")
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     """
     Upload a PDF + topic, extract text, build a FAISS vector store,
     generate an initial teaching monologue, and populate a per-session
     Redis sentence queue.
+
+    Each IP address is allowed exactly one successful upload (rate-limited
+    permanently in Redis).
 
     Form fields:
         uploadedPDF  (file) – PDF document.
@@ -116,8 +128,15 @@ def upload():
     Returns:
         200 – {"session_id": "<uuid>", "sentence_count": <int>}
         400 – Validation error.
+        429 – IP already used its free session.
         500 – Processing error.
     """
+    client_ip = _get_client_ip()
+
+    if _is_ip_rate_limited(client_ip):
+        logger.info("upload: rate-limited request from IP %s.", client_ip)
+        return jsonify({"error": "rate_limited"}), 429
+
     temp_path = None
     try:
         if "uploadedPDF" not in request.files:
@@ -186,6 +205,10 @@ def upload():
         logger.info(
             "upload: session '%s' created with %d sentences.", session_id, len(sentences)
         )
+
+        # Permanently record this IP so it cannot upload again
+        _mark_ip_used(client_ip)
+
         return jsonify({"session_id": session_id, "sentence_count": len(sentences)}), 200
 
     except Exception as exc:

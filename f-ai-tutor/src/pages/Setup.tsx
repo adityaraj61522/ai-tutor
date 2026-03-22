@@ -1,11 +1,14 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { GraduationCap, Upload, FileText, X, ArrowRight, ArrowLeft, Loader2 } from "lucide-react";
+import InterestModal from "@/components/InterestModal";
 
 const BACKEND_URL = "http://localhost:7700";
+
+const SESSION_STORAGE_KEY = "tutorSessionUsed";
 
 const Setup = () => {
   const navigate = useNavigate();
@@ -14,6 +17,14 @@ const Setup = () => {
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<"session" | "ip" | null>(null);
+
+  // Block access if this browser session has already been used
+  useEffect(() => {
+    if (sessionStorage.getItem(SESSION_STORAGE_KEY)) {
+      setBlocked("session");
+    }
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -62,12 +73,19 @@ const Setup = () => {
         body: formData,
       });
 
+      if (res.status === 429) {
+        setBlocked("ip");
+        return;
+      }
+
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `Server error: ${res.status}`);
       }
 
       const data = await res.json();
+      // Mark this browser session as consumed
+      sessionStorage.setItem(SESSION_STORAGE_KEY, "1");
       localStorage.setItem("tutorSessionId", data.session_id);
       localStorage.setItem("tutorTopic", topic);
       localStorage.setItem("tutorFileName", file.name);
@@ -84,6 +102,8 @@ const Setup = () => {
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Session / IP lock overlay */}
+      {blocked && <InterestModal reason={blocked} />}
       {/* Header */}
       <header className="border-b border-border bg-card/50 backdrop-blur-sm">
         <div className="container mx-auto px-6">
@@ -130,8 +150,8 @@ const Setup = () => {
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
                   className={`relative border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${isDragging
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:border-primary/50 hover:bg-muted/30"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50 hover:bg-muted/30"
                     }`}
                 >
                   <input
