@@ -14,6 +14,11 @@ jenkins:
     loggedInUsersCanDoAnything:
       allowAnonymousRead: false
 
+  # ── CSRF crumb – exclude client IP (required when behind a reverse proxy) ──
+  crumbIssuer:
+    standard:
+      excludeClientIPFromCrumb: true
+
   # ── System message shown on the dashboard ─────────────────────────────────
   systemMessage: "AI Tutor – Jenkins CI/CD"
 
