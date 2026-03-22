@@ -9,8 +9,8 @@ services:
       context: ./b-ai-tutor/server
       dockerfile: Dockerfile
     restart: unless-stopped
-    # All secrets / Redis connection details come from the .env file
-    env_file: .env
+    # All secrets / Redis connection details come from the backend .env file
+    env_file: ./b-ai-tutor/server/.env
     environment:
       # Tell Flask to trust X-Forwarded-For set by Caddy
       TRUST_PROXY: "1"
