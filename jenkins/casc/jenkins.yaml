@@ -1,0 +1,27 @@
+jenkins:
+  # ── Security realm – local user database ─────────────────────────────────
+  securityRealm:
+    local:
+      allowsSignup: false
+      enableCaptcha: false
+      users:
+        - id: "aditya_raj"
+          name: "Aditya Raj"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+
+  # ── Only logged-in users can do anything; no anonymous access ─────────────
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+  # ── System message shown on the dashboard ─────────────────────────────────
+  systemMessage: "AI Tutor – Jenkins CI/CD"
+
+  # ── Build executor count on the built-in node ─────────────────────────────
+  numExecutors: 2
+
+# ── Root URL (used in e-mail / webhook links) ─────────────────────────────
+unclassified:
+  location:
+    url: "https://ai-jenkins.aditya-raj.site/"
+    adminAddress: ""

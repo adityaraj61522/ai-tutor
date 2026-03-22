@@ -1,0 +1,12 @@
+# Caddy automatically provisions a TLS certificate for this domain.
+# Make sure DNS for ai-jenkins.aditya-raj.site points to this server
+# before starting the container.
+
+ai-jenkins.aditya-raj.site {
+    # Proxy everything to the Jenkins container on its internal port
+    reverse_proxy jenkins:8080
+
+    # Recommended headers for Jenkins behind a reverse proxy
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host  {host}
+}

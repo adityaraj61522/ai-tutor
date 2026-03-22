@@ -1,0 +1,29 @@
+# Core / pipeline
+workflow-aggregator
+pipeline-stage-view
+git
+github
+github-branch-source
+
+# Credentials & SSH
+credentials-binding
+ssh-agent
+
+# Docker integration
+docker-workflow
+docker-plugin
+
+# Node / npm support
+nodejs
+
+# Test results
+junit
+
+# Timestamps in console
+timestamper
+
+# Build discarder / parameterized builds
+build-timeout
+
+# Configuration as Code – pre-configures admin user & settings
+configuration-as-code
