@@ -3,9 +3,9 @@ Flask application entry point for the AI Tutor backend.
 
 Exposes REST endpoints for:
   - Health check (GET /)
-  - Echo utility (POST /echo)
-  - Redis task queue management (POST /queue/push, /queue/pop, GET /queue/length)
-  - PDF learning pipeline (POST /learn)
+  - PDF upload + session creation (POST /upload)
+  - Per-session sentence polling (GET /session/<id>/next)
+  - Per-session question answering (POST /session/<id>/question)
 
 Environment variables (see .env):
   PORT, FLASK_DEBUG, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, GOOGLE_API_KEY
@@ -13,15 +13,16 @@ Environment variables (see .env):
 
 import logging
 import os
+import re
 import tempfile
+import uuid
 
 import redis
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-from gemini_service import get_gemini_service
-from pdf_extractor import extract_pdf_metadata, extract_text_from_pdf
+from pdf_extractor import extract_text_from_pdf
 from vector_store import VectorStore
 
 # ---------------------------------------------------------------------------
@@ -41,16 +42,6 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests from the frontend
-
-# ---------------------------------------------------------------------------
-# Gemini service (non-fatal if unavailable at startup)
-# ---------------------------------------------------------------------------
-try:
-    gemini = get_gemini_service()
-    logger.info("Gemini service initialised successfully.")
-except Exception as exc:
-    gemini = None
-    logger.warning("Could not initialise Gemini service at startup: %s", exc)
 
 # ---------------------------------------------------------------------------
 # Redis client
@@ -83,93 +74,7 @@ def index():
 
 
 # ---------------------------------------------------------------------------
-# Echo utility (useful for integration testing)
-# ---------------------------------------------------------------------------
-
-@app.route("/echo", methods=["POST"])
-def echo():
-    """Echo the received JSON body back to the caller."""
-    data = request.get_json(silent=True)
-    logger.debug("Echo endpoint called with data: %s", data)
-    return jsonify({"echo": data}), 200
-
-
-# ---------------------------------------------------------------------------
-# Redis task-queue endpoints
-# ---------------------------------------------------------------------------
-
-@app.route("/queue/push", methods=["POST"])
-def queue_push():
-    """
-    Push a message onto the Redis task queue (right-push).
-
-    Request body (JSON):
-        Any JSON-serialisable object.
-
-    Returns:
-        200 – item queued
-        400 – no data provided
-        500 – Redis error
-    """
-    try:
-        data = request.get_json(silent=True)
-        if not data:
-            logger.warning("queue/push called with empty body.")
-            return jsonify({"error": "No data provided"}), 400
-
-        redis_client.rpush("task_queue", str(data))
-        logger.info("Task pushed to queue: %s", data)
-        return jsonify({"status": "queued", "message": "Task added to queue"}), 200
-
-    except Exception as exc:
-        logger.exception("Error pushing to task queue: %s", exc)
-        return jsonify({"error": str(exc)}), 500
-
-
-@app.route("/queue/pop", methods=["POST"])
-def queue_pop():
-    """
-    Pop the oldest message from the Redis task queue (left-pop).
-
-    Returns:
-        200 – item returned, or empty-queue indicator
-        500 – Redis error
-    """
-    try:
-        item = redis_client.lpop("task_queue")
-        if item:
-            logger.info("Task popped from queue: %s", item)
-            return jsonify({"status": "success", "item": item}), 200
-
-        logger.debug("queue/pop called but queue is empty.")
-        return jsonify({"status": "empty", "message": "Queue is empty"}), 200
-
-    except Exception as exc:
-        logger.exception("Error popping from task queue: %s", exc)
-        return jsonify({"error": str(exc)}), 500
-
-
-@app.route("/queue/length", methods=["GET"])
-def queue_length():
-    """
-    Return the current number of items in the Redis task queue.
-
-    Returns:
-        200 – {"length": <int>}
-        500 – Redis error
-    """
-    try:
-        length = redis_client.llen("task_queue")
-        logger.debug("Queue length queried: %d", length)
-        return jsonify({"length": length}), 200
-
-    except Exception as exc:
-        logger.exception("Error fetching queue length: %s", exc)
-        return jsonify({"error": str(exc)}), 500
-
-
-# ---------------------------------------------------------------------------
-# PDF learning pipeline
+# PDF learning pipeline (upload endpoint only)
 # ---------------------------------------------------------------------------
 
 def _cleanup_temp_file(path: str) -> None:
@@ -182,115 +87,203 @@ def _cleanup_temp_file(path: str) -> None:
             logger.warning("Could not remove temporary file %s: %s", path, exc)
 
 
-@app.route("/learn", methods=["POST"])
-def learn():
-    """
-    Full PDF-to-insight pipeline powered by Google Gemini and FAISS.
+# ---------------------------------------------------------------------------
+# Sentence splitter utility
+# ---------------------------------------------------------------------------
 
-    Accepts a multipart/form-data request, extracts text from the uploaded
-    PDF, builds a FAISS vector store with Gemini embeddings, and returns
-    semantically similar chunks plus an LLM-generated insight for the
-    requested topic.
+def _split_into_sentences(text: str) -> list[str]:
+    """Split a block of text into individual, non-trivial sentences."""
+    # Split on sentence-ending punctuation followed by whitespace
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s.strip() for s in parts if s.strip() and len(s.strip()) > 10]
+
+
+# ---------------------------------------------------------------------------
+# PDF upload → session creation
+# ---------------------------------------------------------------------------
+
+@app.route("/upload", methods=["POST"])
+def upload():
+    """
+    Upload a PDF + topic, extract text, build a FAISS vector store,
+    generate an initial teaching monologue, and populate a per-session
+    Redis sentence queue.
 
     Form fields:
-        uploadedPDF  (file)  – The PDF document to process.
-        topicToLearn (str)   – The topic/subject to focus on.
+        uploadedPDF  (file) – PDF document.
+        topicToLearn (str)  – Topic the student wants to learn.
 
     Returns:
-        200 – Success payload with metadata, similar chunks, and QA result.
-        400 – Validation error (missing file, bad extension, no topic, etc.).
-        500 – Internal processing error.
+        200 – {"session_id": "<uuid>", "sentence_count": <int>}
+        400 – Validation error.
+        500 – Processing error.
     """
     temp_path = None
-
     try:
-        # ---- Input validation ------------------------------------------------
         if "uploadedPDF" not in request.files:
-            logger.warning("learn: no PDF file in request.")
             return jsonify({"error": "No PDF file provided"}), 400
 
         file = request.files["uploadedPDF"]
         topic = request.form.get("topicToLearn", "").strip()
 
         if not file.filename:
-            logger.warning("learn: empty filename received.")
             return jsonify({"error": "No PDF file selected"}), 400
-
         if not file.filename.lower().endswith(".pdf"):
-            logger.warning("learn: non-PDF file submitted (%s).", file.filename)
             return jsonify({"error": "File must be a PDF"}), 400
-
         if not topic:
-            logger.warning("learn: topicToLearn is missing.")
             return jsonify({"error": "topicToLearn is required"}), 400
 
-        logger.info("learn: processing topic='%s', file='%s'.", topic, file.filename)
+        logger.info("upload: topic='%s', file='%s'.", topic, file.filename)
 
-        # ---- Save upload to a temp file --------------------------------------
+        # Save to a temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             file.save(tmp.name)
             temp_path = tmp.name
-        logger.debug("learn: PDF saved to temp path %s.", temp_path)
 
-        # ---- PDF text extraction ---------------------------------------------
+        # Extract text
         extracted_text = extract_text_from_pdf(temp_path)
-        metadata = extract_pdf_metadata(temp_path)
-        logger.info(
-            "learn: extracted %d characters from PDF (%d pages).",
-            len(extracted_text),
-            metadata.get("total_pages", "?"),
-        )
-
         if not extracted_text:
             return jsonify({"error": "No text extracted from PDF"}), 400
 
-        # ---- Build FAISS vector store ----------------------------------------
-        vector_store = VectorStore(
-            google_api_key=os.environ.get("GOOGLE_API_KEY"),
-            pickle_file="faiss_store.pkl",
+        # Create session
+        session_id = str(uuid.uuid4())
+        store_path = os.path.join("faiss_store", session_id)
+        api_key = os.environ.get("GOOGLE_API_KEY")
+
+        # Build FAISS vector store
+        vector_store = VectorStore(google_api_key=api_key, pickle_file=store_path)
+        vector_store.create_vector_store_from_text(extracted_text)
+        logger.info("upload: vector store created at '%s'.", store_path)
+
+        # Generate an initial teaching script via RAG
+        teaching_query = (
+            f"You are an enthusiastic and clear AI tutor. "
+            f"Explain '{topic}' in 8 to 10 engaging, complete sentences "
+            f"that a student would enjoy listening to."
         )
+        qa_result = vector_store.query_with_sources(teaching_query)
+        answer_text = qa_result.get("answer", "")
 
-        success = vector_store.create_vector_store_from_text(extracted_text)
-        if not success:
-            logger.error("learn: vector store creation returned False.")
-            return jsonify({"error": "Failed to create vector store"}), 400
+        sentences = _split_into_sentences(answer_text)
+        if not sentences:
+            sentences = [answer_text.strip()]
 
-        logger.info("learn: vector store created successfully.")
+        # Push sentences into the session queue
+        queue_key = f"session:{session_id}:queue"
+        for sentence in sentences:
+            redis_client.rpush(queue_key, sentence)
+        redis_client.expire(queue_key, 3600)
 
-        # ---- Similarity search for topic chunks ------------------------------
-        similar_chunks = vector_store.search_similar(topic, k=5)
-        logger.debug("learn: found %d similar chunks for topic '%s'.", len(similar_chunks), topic)
-
-        # ---- LLM insight generation ------------------------------------------
-        enhanced_query = (
-            f"make something interesting and insightful and exciting "
-            f"for humans and in 60 words from: {topic}"
-        )
-        qa_result = vector_store.query_with_sources(enhanced_query)
-        logger.info("learn: LLM insight generated.")
-
-        # ---- Build and return response ---------------------------------------
-        response = {
-            "status": "success",
+        # Store session metadata
+        meta_key = f"session:{session_id}:meta"
+        redis_client.hset(meta_key, mapping={
             "topic": topic,
-            "metadata": metadata,
-            "extracted_text_length": len(extracted_text),
-            "vector_store_info": vector_store.get_index_info(),
-            "similar_chunks": [
-                {"chunk": chunk, "similarity_score": float(score)}
-                for chunk, score in similar_chunks
-            ],
-            "qa_result": qa_result,
-        }
-        return jsonify(response), 200
+            "store_path": store_path,
+            "filename": file.filename,
+        })
+        redis_client.expire(meta_key, 3600)
+
+        logger.info(
+            "upload: session '%s' created with %d sentences.", session_id, len(sentences)
+        )
+        return jsonify({"session_id": session_id, "sentence_count": len(sentences)}), 200
 
     except Exception as exc:
-        logger.exception("learn: unhandled error – %s", exc)
+        logger.exception("upload: unhandled error – %s", exc)
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        _cleanup_temp_file(temp_path)
+
+
+# ---------------------------------------------------------------------------
+# Per-session sentence polling
+# ---------------------------------------------------------------------------
+
+@app.route("/session/<session_id>/next", methods=["GET"])
+def session_next(session_id: str):
+    """
+    Pop and return the next sentence from the session's Redis queue.
+
+    Returns:
+        200 – {"text": "<sentence>", "done": false, "remaining": <int>}
+              or {"text": null, "done": true, "remaining": 0} when empty.
+        500 – Redis error.
+    """
+    try:
+        queue_key = f"session:{session_id}:queue"
+        sentence = redis_client.lpop(queue_key)
+        if sentence:
+            remaining = redis_client.llen(queue_key)
+            logger.debug("session_next: '%s' → sentence (%d remaining).", session_id, remaining)
+            return jsonify({"text": sentence, "done": False, "remaining": remaining}), 200
+
+        logger.debug("session_next: '%s' → queue empty.", session_id)
+        return jsonify({"text": None, "done": True, "remaining": 0}), 200
+
+    except Exception as exc:
+        logger.exception("session_next: error – %s", exc)
         return jsonify({"error": str(exc)}), 500
 
-    finally:
-        # Always clean up the temporary PDF, regardless of success or failure.
-        _cleanup_temp_file(temp_path)
+
+# ---------------------------------------------------------------------------
+# Per-session question answering
+# ---------------------------------------------------------------------------
+
+@app.route("/session/<session_id>/question", methods=["POST"])
+def session_question(session_id: str):
+    """
+    Answer a student's question using the session's FAISS vector store and
+    push the response sentences back into the session queue.
+
+    Request body (JSON):
+        {"question": "<text>"}
+
+    Returns:
+        200 – {"status": "queued", "sentence_count": <int>}
+        400 – Missing question.
+        404 – Session not found / expired.
+        500 – Processing error.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        question = data.get("question", "").strip()
+        if not question:
+            return jsonify({"error": "question is required"}), 400
+
+        meta_key = f"session:{session_id}:meta"
+        meta = redis_client.hgetall(meta_key)
+        if not meta:
+            return jsonify({"error": "Session not found or expired"}), 404
+
+        store_path = meta.get("store_path", "")
+        api_key = os.environ.get("GOOGLE_API_KEY")
+
+        # Load session vector store and answer the question
+        vector_store = VectorStore(google_api_key=api_key, pickle_file=store_path)
+        loaded = vector_store.load_index()
+        if not loaded:
+            return jsonify({"error": "Could not load session vector store"}), 500
+
+        qa_result = vector_store.query_with_sources(question)
+        answer_text = qa_result.get("answer", "")
+
+        sentences = _split_into_sentences(answer_text)
+        if not sentences:
+            sentences = [answer_text.strip()]
+
+        queue_key = f"session:{session_id}:queue"
+        for sentence in sentences:
+            redis_client.rpush(queue_key, sentence)
+        redis_client.expire(queue_key, 3600)
+
+        logger.info(
+            "session_question: '%s' → %d sentences queued.", session_id, len(sentences)
+        )
+        return jsonify({"status": "queued", "sentence_count": len(sentences)}), 200
+
+    except Exception as exc:
+        logger.exception("session_question: error – %s", exc)
+        return jsonify({"error": str(exc)}), 500
 
 
 # ---------------------------------------------------------------------------

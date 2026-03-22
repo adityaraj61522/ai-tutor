@@ -427,19 +427,3 @@ class VectorStore:
             "index_path": self.pickle_file,
             "type": type(self.vectorstore).__name__,
         }
-
-    # ------------------------------------------------------------------
-    # Deprecated stubs (kept for backwards compatibility)
-    # ------------------------------------------------------------------
-
-    def create_embeddings(self, chunks: List[str]) -> None:
-        """Deprecated – use create_vector_store_from_text() instead."""
-        raise NotImplementedError("Deprecated.  Use create_vector_store_from_text().")
-
-    def build_index(self, hits: int = 128) -> None:
-        """Deprecated – use create_vector_store_from_text() instead."""
-        raise NotImplementedError("Deprecated.  Use create_vector_store_from_text().")
-
-    def add_documents(self, chunks: List[str]) -> None:
-        """Deprecated – use create_vector_store_from_text() instead."""
-        raise NotImplementedError("Deprecated.  Use create_vector_store_from_text().")

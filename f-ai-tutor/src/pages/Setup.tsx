@@ -1,16 +1,19 @@
 import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { GraduationCap, Upload, FileText, X, ArrowRight, ArrowLeft } from "lucide-react";
+import { GraduationCap, Upload, FileText, X, ArrowRight, ArrowLeft, Loader2 } from "lucide-react";
+
+const BACKEND_URL = "http://localhost:7700";
 
 const Setup = () => {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [topic, setTopic] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -42,18 +45,42 @@ const Setup = () => {
     setFile(null);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Store the setup data and navigate to session
-    if (file && topic.trim()) {
-      // In a real app, you'd upload the file and process it
+    if (!file || !topic.trim()) return;
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("uploadedPDF", file);
+      formData.append("topicToLearn", topic);
+
+      const res = await fetch(`${BACKEND_URL}/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Server error: ${res.status}`);
+      }
+
+      const data = await res.json();
+      localStorage.setItem("tutorSessionId", data.session_id);
       localStorage.setItem("tutorTopic", topic);
       localStorage.setItem("tutorFileName", file.name);
       navigate("/session");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Something went wrong";
+      setError(msg);
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const isValid = file && topic.trim().length > 0;
+  const isValid = file && topic.trim().length > 0 && !isLoading;
 
   return (
     <div className="min-h-screen bg-background">
@@ -96,17 +123,16 @@ const Setup = () => {
             {/* File Upload */}
             <div className="space-y-3">
               <Label className="text-base font-semibold">Upload Document</Label>
-              
+
               {!file ? (
                 <div
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
-                  className={`relative border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${
-                    isDragging
+                  className={`relative border-2 border-dashed rounded-2xl p-12 text-center transition-all duration-200 ${isDragging
                       ? "border-primary bg-primary/5"
                       : "border-border hover:border-primary/50 hover:bg-muted/30"
-                  }`}
+                    }`}
                 >
                   <input
                     type="file"
@@ -169,6 +195,13 @@ const Setup = () => {
               </p>
             </div>
 
+            {/* Error message */}
+            {error && (
+              <div className="p-4 rounded-xl bg-destructive/10 border border-destructive/30 text-destructive text-sm">
+                {error}
+              </div>
+            )}
+
             {/* Submit Button */}
             <Button
               type="submit"
@@ -177,8 +210,17 @@ const Setup = () => {
               className="w-full group"
               disabled={!isValid}
             >
-              Start Learning Session
-              <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+              {isLoading ? (
+                <>
+                  <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                  Preparing your session…
+                </>
+              ) : (
+                <>
+                  Start Learning Session
+                  <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                </>
+              )}
             </Button>
           </form>
         </div>
